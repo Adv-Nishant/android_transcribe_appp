@@ -1,6 +1,7 @@
 package dev.notune.transcribe;
 
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.content.res.ColorStateList;
@@ -12,7 +13,9 @@ import android.util.TypedValue;
 import android.view.View;
 import android.widget.Button;
 import android.widget.CompoundButton;
+import android.widget.EditText;
 import android.widget.ImageView;
+import android.widget.LinearLayout;
 import android.widget.RadioGroup;
 import android.widget.TextView;
 
@@ -53,11 +56,31 @@ public class MainActivity extends AppCompatActivity {
     private TextView benchResultText;
     private Button modelsButton;
     private boolean benchRunning;
+    private static final int REQ_NOTE_VOICE = 303;
+    private static final int REQ_AUDIO_FILE = 304;
+    private EditText noteEditor;
+    private LinearLayout notesList;
+    private TextView notesEmpty;
+    private LinearLayout homeContent;
+    private View settingsContent;
+    private SharedPreferences notesPrefs;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+
+        homeContent = findViewById(R.id.home_content);
+        settingsContent = findViewById(R.id.settings_content);
+        noteEditor = findViewById(R.id.note_editor);
+        notesList = findViewById(R.id.notes_list);
+        notesEmpty = findViewById(R.id.notes_empty);
+        notesPrefs = getSharedPreferences("notes", MODE_PRIVATE);
+        loadNotes();
+        findViewById(R.id.btn_open_settings).setOnClickListener(v -> showSettings());
+        findViewById(R.id.btn_note_save).setOnClickListener(v -> saveNote());
+        findViewById(R.id.btn_note_record).setOnClickListener(v -> launchNoteVoice());
+        findViewById(R.id.btn_note_import).setOnClickListener(v -> importAudio());
 
         statusText = findViewById(R.id.text_status);
         voiceStatusText = findViewById(R.id.text_voice_status);
@@ -170,6 +193,85 @@ public class MainActivity extends AppCompatActivity {
         initNative(this);
     }
 
+    private void showSettings() {
+        homeContent.setVisibility(View.GONE);
+        settingsContent.setVisibility(View.VISIBLE);
+        com.google.android.material.appbar.MaterialToolbar toolbar = findViewById(R.id.toolbar);
+        toolbar.setNavigationIcon(android.R.drawable.ic_menu_revert);
+        toolbar.setNavigationOnClickListener(v -> showHome());
+        toolbar.setTitle(R.string.section_settings);
+    }
+
+    private void showHome() {
+        settingsContent.setVisibility(View.GONE);
+        homeContent.setVisibility(View.VISIBLE);
+        com.google.android.material.appbar.MaterialToolbar toolbar = findViewById(R.id.toolbar);
+        toolbar.setNavigationIcon(null);
+        toolbar.setNavigationOnClickListener(null);
+        toolbar.setTitle(R.string.app_name);
+    }
+
+    private void saveNote() {
+        String text = noteEditor.getText().toString().trim();
+        if (text.isEmpty()) {
+            snackbar(getString(R.string.note_empty));
+            return;
+        }
+        long id = System.currentTimeMillis();
+        notesPrefs.edit().putString("note_" + id, text).apply();
+        noteEditor.setText("");
+        addNoteView(text, id, true);
+        notesEmpty.setVisibility(View.GONE);
+        snackbar(getString(R.string.note_saved));
+    }
+
+    private void loadNotes() {
+        java.util.ArrayList<String> keys = new java.util.ArrayList<>(notesPrefs.getAll().keySet());
+        java.util.Collections.sort(keys, java.util.Collections.reverseOrder());
+        for (String key : keys) {
+            if (key.startsWith("note_")) {
+                String text = notesPrefs.getString(key, "");
+                if (!text.isEmpty()) addNoteView(text, Long.parseLong(key.substring(5)), false);
+            }
+        }
+        notesEmpty.setVisibility(notesList.getChildCount() == 0 ? View.VISIBLE : View.GONE);
+    }
+
+    private void addNoteView(String text, long id, boolean atTop) {
+        TextView note = new TextView(this);
+        note.setText(text);
+        note.setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodyLarge);
+        note.setTextColor(themeColor(com.google.android.material.R.attr.colorOnSurface));
+        note.setPadding(16, 16, 16, 16);
+        note.setBackgroundResource(R.drawable/bg_card);
+        note.setOnLongClickListener(v -> {
+            notesPrefs.edit().remove("note_" + id).apply();
+            notesList.removeView(note);
+            notesEmpty.setVisibility(notesList.getChildCount() == 0 ? View.VISIBLE : View.GONE);
+            return true;
+        });
+        if (atTop) notesList.addView(note, 0);
+        else notesList.addView(note);
+    }
+
+    private void launchNoteVoice() {
+        Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+        try {
+            startActivityForResult(intent, REQ_NOTE_VOICE);
+        } catch (android.content.ActivityNotFoundException e) {
+            snackbar(getString(R.string.voice_test_failed));
+        }
+    }
+
+    private void importAudio() {
+        Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        picker.setType("audio/*");
+        picker.addCategory(Intent.CATEGORY_OPENABLE);
+        startActivityForResult(picker, REQ_AUDIO_FILE);
+    }
+
     /**
      * Without any speech model (F-Droid builds start without one), nothing
      * that transcribes can work: say so in red and lead to the models screen.
@@ -272,6 +374,20 @@ public class MainActivity extends AppCompatActivity {
             snackbar(heard != null && !heard.trim().isEmpty()
                     ? getString(R.string.voice_test_ok, heard)
                     : getString(R.string.voice_test_empty));
+        }
+        if (requestCode == REQ_NOTE_VOICE && resultCode == RESULT_OK && data != null) {
+            ArrayList<String> results =
+                    data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS);
+            if (results != null && !results.isEmpty()) {
+                noteEditor.append(results.get(0));
+                noteEditor.requestFocus();
+            }
+        } else if (requestCode == REQ_AUDIO_FILE && resultCode == RESULT_OK && data != null
+                && data.getData() != null) {
+            Intent transcribe = new Intent(this, TranscribeFileActivity.class);
+            transcribe.setAction(Intent.ACTION_VIEW);
+            transcribe.setData(data.getData());
+            startActivity(transcribe);
         }
         // onResume() also refreshes, but do it here too for an immediate update.
         updateVoiceInputStatus();
